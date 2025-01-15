@@ -1,6 +1,9 @@
 package match
 
 import (
+	"regexp"
+
+	"github.com/anchore/grype/internal/log"
 	"github.com/bmatcuk/doublestar/v2"
 )
 
@@ -17,17 +20,24 @@ type IgnoredMatch struct {
 // specified criteria must be met by the vulnerability match in order for the
 // rule to apply.
 type IgnoreRule struct {
-	Vulnerability string            `yaml:"vulnerability" json:"vulnerability" mapstructure:"vulnerability"`
-	FixState      string            `yaml:"fix-state" json:"fix-state" mapstructure:"fix-state"`
-	Package       IgnoreRulePackage `yaml:"package" json:"package" mapstructure:"package"`
+	Vulnerability    string            `yaml:"vulnerability" json:"vulnerability" mapstructure:"vulnerability"`
+	Reason           string            `yaml:"reason" json:"reason" mapstructure:"reason"`
+	Namespace        string            `yaml:"namespace" json:"namespace" mapstructure:"namespace"`
+	FixState         string            `yaml:"fix-state" json:"fix-state" mapstructure:"fix-state"`
+	Package          IgnoreRulePackage `yaml:"package" json:"package" mapstructure:"package"`
+	VexStatus        string            `yaml:"vex-status" json:"vex-status" mapstructure:"vex-status"`
+	VexJustification string            `yaml:"vex-justification" json:"vex-justification" mapstructure:"vex-justification"`
+	MatchType        Type              `yaml:"match-type" json:"match-type" mapstructure:"match-type"`
 }
 
 // IgnoreRulePackage describes the Package-specific fields that comprise the IgnoreRule.
 type IgnoreRulePackage struct {
-	Name     string `yaml:"name" json:"name" mapstructure:"name"`
-	Version  string `yaml:"version" json:"version" mapstructure:"version"`
-	Type     string `yaml:"type" json:"type" mapstructure:"type"`
-	Location string `yaml:"location" json:"location" mapstructure:"location"`
+	Name         string `yaml:"name" json:"name" mapstructure:"name"`
+	Version      string `yaml:"version" json:"version" mapstructure:"version"`
+	Language     string `yaml:"language" json:"language" mapstructure:"language"`
+	Type         string `yaml:"type" json:"type" mapstructure:"type"`
+	Location     string `yaml:"location" json:"location" mapstructure:"location"`
+	UpstreamName string `yaml:"upstream-name" json:"upstream-name" mapstructure:"upstream-name"`
 }
 
 // ApplyIgnoreRules iterates through the provided matches and, for each match,
@@ -40,7 +50,7 @@ func ApplyIgnoreRules(matches Matches, rules []IgnoreRule) (Matches, []IgnoredMa
 	var ignoredMatches []IgnoredMatch
 	remainingMatches := NewMatches()
 
-	for match := range matches.Enumerate() {
+	for _, match := range matches.Sorted() {
 		var applicableRules []IgnoreRule
 
 		for _, rule := range rules {
@@ -58,13 +68,18 @@ func ApplyIgnoreRules(matches Matches, rules []IgnoreRule) (Matches, []IgnoredMa
 			continue
 		}
 
-		remainingMatches.add(match.Package.ID, match)
+		remainingMatches.Add(match)
 	}
 
 	return remainingMatches, ignoredMatches
 }
 
 func shouldIgnore(match Match, rule IgnoreRule) bool {
+	// VEX rules are handled by the vex processor
+	if rule.VexStatus != "" {
+		return false
+	}
+
 	ignoreConditions := getIgnoreConditionsForRule(rule)
 	if len(ignoreConditions) == 0 {
 		// this rule specifies no criteria, so it doesn't apply to the Match
@@ -82,6 +97,12 @@ func shouldIgnore(match Match, rule IgnoreRule) bool {
 	return true
 }
 
+// HasConditions returns true if the ignore rule has conditions
+// that can cause a match to be ignored
+func (ir IgnoreRule) HasConditions() bool {
+	return len(getIgnoreConditionsForRule(ir)) == 0
+}
+
 // An ignoreCondition is a function that returns a boolean indicating whether
 // the given Match should be ignored.
 type ignoreCondition func(match Match) bool
@@ -93,12 +114,20 @@ func getIgnoreConditionsForRule(rule IgnoreRule) []ignoreCondition {
 		ignoreConditions = append(ignoreConditions, ifVulnerabilityApplies(v))
 	}
 
+	if ns := rule.Namespace; ns != "" {
+		ignoreConditions = append(ignoreConditions, ifNamespaceApplies(ns))
+	}
+
 	if n := rule.Package.Name; n != "" {
 		ignoreConditions = append(ignoreConditions, ifPackageNameApplies(n))
 	}
 
 	if v := rule.Package.Version; v != "" {
 		ignoreConditions = append(ignoreConditions, ifPackageVersionApplies(v))
+	}
+
+	if l := rule.Package.Language; l != "" {
+		ignoreConditions = append(ignoreConditions, ifPackageLanguageApplies(l))
 	}
 
 	if t := rule.Package.Type; t != "" {
@@ -113,6 +142,13 @@ func getIgnoreConditionsForRule(rule IgnoreRule) []ignoreCondition {
 		ignoreConditions = append(ignoreConditions, ifFixStateApplies(fs))
 	}
 
+	if upstreamName := rule.Package.UpstreamName; upstreamName != "" {
+		ignoreConditions = append(ignoreConditions, ifUpstreamPackageNameApplies(upstreamName))
+	}
+
+	if matchType := rule.MatchType; matchType != "" {
+		ignoreConditions = append(ignoreConditions, ifMatchTypeApplies(matchType))
+	}
 	return ignoreConditions
 }
 
@@ -128,15 +164,40 @@ func ifVulnerabilityApplies(vulnerability string) ignoreCondition {
 	}
 }
 
-func ifPackageNameApplies(name string) ignoreCondition {
+func ifNamespaceApplies(namespace string) ignoreCondition {
 	return func(match Match) bool {
-		return name == match.Package.Name
+		return namespace == match.Vulnerability.Namespace
+	}
+}
+
+func packageNameRegex(packageName string) (*regexp.Regexp, error) {
+	pattern := packageName
+	if packageName[0] != '$' || packageName[len(packageName)-1] != '^' {
+		pattern = "^" + packageName + "$"
+	}
+	return regexp.Compile(pattern)
+}
+
+func ifPackageNameApplies(name string) ignoreCondition {
+	pattern, err := packageNameRegex(name)
+	if err != nil {
+		return func(Match) bool { return false }
+	}
+
+	return func(match Match) bool {
+		return pattern.MatchString(match.Package.Name)
 	}
 }
 
 func ifPackageVersionApplies(version string) ignoreCondition {
 	return func(match Match) bool {
 		return version == match.Package.Version
+	}
+}
+
+func ifPackageLanguageApplies(language string) ignoreCondition {
+	return func(match Match) bool {
+		return language == string(match.Package.Language)
 	}
 }
 
@@ -152,13 +213,40 @@ func ifPackageLocationApplies(location string) ignoreCondition {
 	}
 }
 
+func ifUpstreamPackageNameApplies(name string) ignoreCondition {
+	pattern, err := packageNameRegex(name)
+	if err != nil {
+		log.WithFields("name", name, "error", err).Debug("unable to parse name expression")
+		return func(Match) bool { return false }
+	}
+	return func(match Match) bool {
+		for _, upstream := range match.Package.Upstreams {
+			if pattern.MatchString(upstream.Name) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func ifMatchTypeApplies(matchType Type) ignoreCondition {
+	return func(match Match) bool {
+		for _, mType := range match.Details.Types() {
+			if mType == matchType {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 func ruleLocationAppliesToMatch(location string, match Match) bool {
-	for _, packageLocation := range match.Package.Locations {
+	for _, packageLocation := range match.Package.Locations.ToSlice() {
 		if ruleLocationAppliesToPath(location, packageLocation.RealPath) {
 			return true
 		}
 
-		if ruleLocationAppliesToPath(location, packageLocation.VirtualPath) {
+		if ruleLocationAppliesToPath(location, packageLocation.AccessPath) {
 			return true
 		}
 	}

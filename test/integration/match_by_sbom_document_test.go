@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/anchore/grype/grype/matcher/common"
-
-	"github.com/anchore/grype/grype"
-	"github.com/anchore/grype/grype/match"
-	"github.com/anchore/grype/grype/vulnerability"
-	"github.com/anchore/syft/syft/source"
-	"github.com/go-test/deep"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/scylladb/go-set/strset"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/anchore/grype/grype"
+	v5 "github.com/anchore/grype/grype/db/v5"
+	"github.com/anchore/grype/grype/match"
+	"github.com/anchore/grype/grype/pkg"
+	"github.com/anchore/syft/syft/source"
 )
 
 func TestMatchBySBOMDocument(t *testing.T) {
@@ -20,20 +22,21 @@ func TestMatchBySBOMDocument(t *testing.T) {
 		name            string
 		fixture         string
 		expectedIDs     []string
-		expectedDetails []match.Details
+		expectedDetails []match.Detail
 	}{
 		{
-			name:        "single package",
+			name:        "single KB package",
 			fixture:     "test-fixtures/sbom/syft-sbom-with-kb-packages.json",
 			expectedIDs: []string{"CVE-2016-3333"},
-			expectedDetails: []match.Details{
+			expectedDetails: []match.Detail{
 				{
+					Type: match.ExactDirectMatch,
 					SearchedBy: map[string]interface{}{
 						"distro": map[string]string{
 							"type":    "windows",
 							"version": "10816",
 						},
-						"namespace": "msrc:10816",
+						"namespace": "msrc:distro:windows:10816",
 						"package": map[string]string{
 							"name":    "10816",
 							"version": "3200970",
@@ -41,6 +44,7 @@ func TestMatchBySBOMDocument(t *testing.T) {
 					},
 					Found: map[string]interface{}{
 						"versionConstraint": "3200970 || 878787 || base (kb)",
+						"vulnerabilityID":   "CVE-2016-3333",
 					},
 					Matcher:    match.MsrcMatcher,
 					Confidence: 1,
@@ -50,31 +54,18 @@ func TestMatchBySBOMDocument(t *testing.T) {
 		{
 			name:        "unknown package type",
 			fixture:     "test-fixtures/sbom/syft-sbom-with-unknown-packages.json",
-			expectedIDs: []string{"CVE-bogus-my-package-1", "CVE-bogus-my-package-2-python"},
-			expectedDetails: []match.Details{
+			expectedIDs: []string{"CVE-bogus-my-package-2-idris"},
+			expectedDetails: []match.Detail{
 				{
-					SearchedBy: common.SearchedByCPEs{
-						Namespace: "nvd",
-						CPEs: []string{
-							"cpe:2.3:a:bogus:my-package:1.0.5:*:*:*:*:*:*:*",
-						},
-					},
-					Found: common.FoundCPEs{
-						VersionConstraint: "< 2.0 (unknown)",
-						CPEs: []string{
-							"cpe:2.3:a:bogus:my-package:*:*:*:*:*:*:something:*",
-						},
-					},
-					Matcher:    match.StockMatcher,
-					Confidence: 0.9,
-				},
-				{
+					Type: match.ExactDirectMatch,
 					SearchedBy: map[string]interface{}{
-						"language":  "python",
-						"namespace": "github:python",
+						"language":  "idris",
+						"namespace": "github:language:idris",
+						"package":   map[string]string{"name": "my-package", "version": "1.0.5"},
 					},
 					Found: map[string]interface{}{
-						"versionConstraint": "< 2.0 (python)",
+						"versionConstraint": "< 2.0 (unknown)",
+						"vulnerabilityID":   "CVE-bogus-my-package-2-idris",
 					},
 					Matcher:    match.StockMatcher,
 					Confidence: 1,
@@ -85,22 +76,34 @@ func TestMatchBySBOMDocument(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			provider := vulnerability.NewProviderFromStore(newMockDbStore())
-			matches, _, _, err := grype.FindVulnerabilities(provider, fmt.Sprintf("sbom:%s", test.fixture), source.SquashedScope, nil)
+			mkStr := newMockDbStore()
+			vp, err := v5.NewVulnerabilityProvider(mkStr)
+			require.NoError(t, err)
+			mp := v5.NewVulnerabilityMetadataProvider(mkStr)
+			ep := v5.NewMatchExclusionProvider(mkStr)
+			str := v5.ProviderStore{
+				VulnerabilityProvider:         vp,
+				VulnerabilityMetadataProvider: mp,
+				ExclusionProvider:             ep,
+			}
+			matches, _, _, err := grype.FindVulnerabilities(str, fmt.Sprintf("sbom:%s", test.fixture), source.SquashedScope, nil)
 			assert.NoError(t, err)
-			details := make([]match.Details, 0)
+			details := make([]match.Detail, 0)
 			ids := strset.New()
 			for _, m := range matches.Sorted() {
-				details = append(details, m.MatchDetails...)
+				details = append(details, m.Details...)
 				ids.Add(m.Vulnerability.ID)
 			}
-			if !assert.Len(t, details, len(test.expectedDetails)) {
-				t.Fatalf("mismatched lengths, will not compare")
+
+			require.Len(t, details, len(test.expectedDetails))
+
+			cmpOpts := []cmp.Option{
+				cmpopts.IgnoreFields(pkg.Package{}, "Locations"),
 			}
 
 			for i := range test.expectedDetails {
-				for _, d := range deep.Equal(test.expectedDetails[i], details[i]) {
-					t.Error(d)
+				if d := cmp.Diff(test.expectedDetails[i], details[i], cmpOpts...); d != "" {
+					t.Errorf("unexpected match details (-want +got):\n%s", d)
 				}
 			}
 

@@ -5,19 +5,22 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"sort"
 	"text/template"
 
+	"github.com/Masterminds/sprig/v3"
 	"github.com/mitchellh/go-homedir"
 
-	"github.com/anchore/grype/grype/presenter/models"
-
+	"github.com/anchore/clio"
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
+	"github.com/anchore/grype/grype/presenter/models"
 	"github.com/anchore/grype/grype/vulnerability"
 )
 
 // Presenter is an implementation of presenter.Presenter that formats output according to a user-provided Go text template.
 type Presenter struct {
+	id                 clio.Identification
 	matches            match.Matches
 	ignoredMatches     []match.IgnoredMatch
 	packages           []pkg.Package
@@ -29,16 +32,17 @@ type Presenter struct {
 }
 
 // NewPresenter returns a new template.Presenter.
-func NewPresenter(matches match.Matches, ignoredMatches []match.IgnoredMatch, packages []pkg.Package, context pkg.Context, metadataProvider vulnerability.MetadataProvider, appConfig interface{}, dbStatus interface{}, pathToTemplateFile string) *Presenter {
+func NewPresenter(pb models.PresenterConfig, templateFile string) *Presenter {
 	return &Presenter{
-		matches:            matches,
-		ignoredMatches:     ignoredMatches,
-		packages:           packages,
-		metadataProvider:   metadataProvider,
-		context:            context,
-		appConfig:          appConfig,
-		dbStatus:           dbStatus,
-		pathToTemplateFile: pathToTemplateFile,
+		id:                 pb.ID,
+		matches:            pb.Matches,
+		ignoredMatches:     pb.IgnoredMatches,
+		packages:           pb.Packages,
+		metadataProvider:   pb.MetadataProvider,
+		context:            pb.Context,
+		appConfig:          pb.AppConfig,
+		dbStatus:           pb.DBStatus,
+		pathToTemplateFile: templateFile,
 	}
 }
 
@@ -55,12 +59,12 @@ func (pres *Presenter) Present(output io.Writer) error {
 	}
 
 	templateName := expandedPathToTemplateFile
-	tmpl, err := template.New(templateName).Funcs(funcMap).Parse(string(templateContents))
+	tmpl, err := template.New(templateName).Funcs(FuncMap).Parse(string(templateContents))
 	if err != nil {
 		return fmt.Errorf("unable to parse template: %w", err)
 	}
 
-	document, err := models.NewDocument(pres.packages, pres.context, pres.matches, pres.ignoredMatches, pres.metadataProvider,
+	document, err := models.NewDocument(pres.id, pres.packages, pres.context, pres.matches, pres.ignoredMatches, pres.metadataProvider,
 		pres.appConfig, pres.dbStatus)
 	if err != nil {
 		return err
@@ -74,13 +78,24 @@ func (pres *Presenter) Present(output io.Writer) error {
 	return nil
 }
 
-// These are custom functions available to template authors.
-var funcMap = template.FuncMap{
-	"getLastIndex": func(collection interface{}) int {
+// FuncMap is a function that returns template.FuncMap with custom functions available to template authors.
+var FuncMap = func() template.FuncMap {
+	f := sprig.HermeticTxtFuncMap()
+	f["getLastIndex"] = func(collection interface{}) int {
 		if v := reflect.ValueOf(collection); v.Kind() == reflect.Slice {
 			return v.Len() - 1
 		}
 
 		return 0
-	},
-}
+	}
+	f["byMatchName"] = func(collection interface{}) interface{} {
+		matches, ok := collection.([]models.Match)
+		if !ok {
+			return collection
+		}
+
+		sort.Sort(models.MatchSort(matches))
+		return matches
+	}
+	return f
+}()

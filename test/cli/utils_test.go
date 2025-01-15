@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/anchore/stereoscope/pkg/imagetest"
 )
 
@@ -25,14 +27,27 @@ func getFixtureImage(tb testing.TB, fixtureImageName string) string {
 
 func getGrypeCommand(tb testing.TB, args ...string) *exec.Cmd {
 	tb.Helper()
+	argsWithConfig := args
+	if !grypeCommandHasConfigArg(argsWithConfig...) {
+		argsWithConfig = append(
+			[]string{"-c", "../grype-test-config.yaml"},
+			args...,
+		)
+	}
 
 	return exec.Command(
 		getGrypeSnapshotLocation(tb, runtime.GOOS),
-		append(
-			[]string{"-c", "../grype-test-config.yaml"},
-			args...,
-		)...,
+		argsWithConfig...,
 	)
+}
+
+func grypeCommandHasConfigArg(args ...string) bool {
+	for _, arg := range args {
+		if arg == "-c" || arg == "--config" {
+			return true
+		}
+	}
+	return false
 }
 
 func getGrypeSnapshotLocation(tb testing.TB, goOS string) string {
@@ -41,12 +56,16 @@ func getGrypeSnapshotLocation(tb testing.TB, goOS string) string {
 		return os.Getenv("GRYPE_BINARY_LOCATION")
 	}
 
-	// note: there is a subtle - vs _ difference between these versions
+	// note: for amd64 we need to update the snapshot location with the v1 suffix
+	// see : https://goreleaser.com/customization/build/#why-is-there-a-_v1-suffix-on-amd64-builds
+	archPath := runtime.GOARCH
+	if runtime.GOARCH == "amd64" {
+		archPath = fmt.Sprintf("%s_v1", archPath)
+	}
+
 	switch goOS {
-	case "darwin":
-		return path.Join(repoRoot(tb), fmt.Sprintf("snapshot/grype-macos_darwin_%s/grype", runtime.GOARCH))
-	case "linux":
-		return path.Join(repoRoot(tb), fmt.Sprintf("snapshot/grype_linux_%s/grype", runtime.GOARCH))
+	case "darwin", "linux":
+		return path.Join(repoRoot(tb), fmt.Sprintf("snapshot/%s-build_%s_%s/grype", goOS, goOS, archPath))
 	default:
 		tb.Fatalf("unsupported OS: %s", runtime.GOOS)
 	}
@@ -120,27 +139,13 @@ func repoRoot(tb testing.TB) string {
 func attachFileToCommandStdin(tb testing.TB, file io.Reader, command *exec.Cmd) {
 	tb.Helper()
 
-	stdin, err := command.StdinPipe()
-	if err != nil {
-		tb.Fatal(err)
-	}
-
-	_, err = io.Copy(stdin, file)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	err = stdin.Close()
-	if err != nil {
-		tb.Fatal(err)
-	}
+	b, err := io.ReadAll(file)
+	require.NoError(tb, err)
+	command.Stdin = bytes.NewReader(b)
 }
 
 func assertCommandExecutionSuccess(t testing.TB, cmd *exec.Cmd) {
-	t.Logf("Running command: %q", cmd)
-	output, err := cmd.CombinedOutput()
-
-	t.Logf("Full command output:\n%s\n", output)
-
+	_, err := cmd.CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			t.Fatal(exitErr)

@@ -4,15 +4,16 @@ import (
 	"encoding/json"
 	"io"
 
-	"github.com/anchore/grype/grype/presenter/models"
-
+	"github.com/anchore/clio"
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
+	"github.com/anchore/grype/grype/presenter/models"
 	"github.com/anchore/grype/grype/vulnerability"
 )
 
 // Presenter is a generic struct for holding fields needed for reporting
 type Presenter struct {
+	id               clio.Identification
 	matches          match.Matches
 	ignoredMatches   []match.IgnoredMatch
 	packages         []pkg.Package
@@ -22,22 +23,23 @@ type Presenter struct {
 	dbStatus         interface{}
 }
 
-// NewPresenter is a *Presenter constructor
-func NewPresenter(matches match.Matches, ignoredMatches []match.IgnoredMatch, packages []pkg.Package, context pkg.Context, metadataProvider vulnerability.MetadataProvider, appConfig interface{}, dbStatus interface{}) *Presenter {
+// NewPresenter creates a new JSON presenter
+func NewPresenter(pb models.PresenterConfig) *Presenter {
 	return &Presenter{
-		matches:          matches,
-		ignoredMatches:   ignoredMatches,
-		packages:         packages,
-		metadataProvider: metadataProvider,
-		context:          context,
-		appConfig:        appConfig,
-		dbStatus:         dbStatus,
+		id:               pb.ID,
+		matches:          pb.Matches,
+		ignoredMatches:   pb.IgnoredMatches,
+		packages:         pb.Packages,
+		metadataProvider: pb.MetadataProvider,
+		context:          pb.Context,
+		appConfig:        pb.AppConfig,
+		dbStatus:         pb.DBStatus,
 	}
 }
 
 // Present creates a JSON-based reporting
 func (pres *Presenter) Present(output io.Writer) error {
-	doc, err := models.NewDocument(pres.packages, pres.context, pres.matches, pres.ignoredMatches, pres.metadataProvider,
+	doc, err := models.NewDocument(pres.id, pres.packages, pres.context, pres.matches, pres.ignoredMatches, pres.metadataProvider,
 		pres.appConfig, pres.dbStatus)
 	if err != nil {
 		return err
