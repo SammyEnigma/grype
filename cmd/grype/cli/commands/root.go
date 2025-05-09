@@ -209,7 +209,7 @@ func runGrype(app clio.Application, opts *options.Grype, userInput string) (errs
 	log.WithFields("time", time.Since(startTime)).Info("found vulnerability matches")
 	startTime = time.Now()
 
-	model, err := models.NewDocument(app.ID(), packages, pkgContext, *remainingMatches, ignoredMatches, vp, opts, dbInfo(status, vp), models.SortByPackage)
+	model, err := models.NewDocument(app.ID(), packages, pkgContext, *remainingMatches, ignoredMatches, vp, opts, dbInfo(status, vp), models.SortStrategy(opts.SortBy.Criteria))
 	if err != nil {
 		return fmt.Errorf("failed to create document: %w", err)
 	}
@@ -273,16 +273,18 @@ func applyDistroHint(pkgs []pkg.Package, context *pkg.Context, opts *options.Gry
 		}
 	}
 
-	hasOSPackage := false
+	hasOSPackageWithoutDistro := false
 	for _, p := range pkgs {
 		switch p.Type {
 		case syftPkg.AlpmPkg, syftPkg.DebPkg, syftPkg.RpmPkg, syftPkg.KbPkg:
-			hasOSPackage = true
+			if p.Distro == nil {
+				hasOSPackageWithoutDistro = true
+			}
 		}
 	}
 
-	if context.Distro == nil && hasOSPackage {
-		log.Warnf("Unable to determine the OS distribution. This may result in missing vulnerabilities. " +
+	if context.Distro == nil && hasOSPackageWithoutDistro {
+		log.Warnf("Unable to determine the OS distribution of some packages. This may result in missing vulnerabilities. " +
 			"You may specify a distro using: --distro <distro>:<version>")
 	}
 }
