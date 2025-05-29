@@ -12,6 +12,7 @@ import (
 	"github.com/anchore/clio"
 	"github.com/anchore/grype/cmd/grype/cli/options"
 	"github.com/anchore/grype/grype"
+	"github.com/anchore/grype/grype/distro"
 	"github.com/anchore/grype/grype/event"
 	"github.com/anchore/grype/grype/event/parsers"
 	"github.com/anchore/grype/grype/grypeerr"
@@ -35,7 +36,6 @@ import (
 	"github.com/anchore/grype/internal/stringutil"
 	"github.com/anchore/syft/syft"
 	"github.com/anchore/syft/syft/cataloging"
-	"github.com/anchore/syft/syft/linux"
 	syftPkg "github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/sbom"
 )
@@ -65,6 +65,7 @@ You can also explicitly specify the scheme to use:
     {{.appName}} registry:yourrepo/yourimage:tag        pull image directly from a registry (no container runtime required)
     {{.appName}} purl:path/to/purl/file                 read a newline separated file of package URLs from a path on disk
     {{.appName}} PURL                                   read a single package PURL directly (e.g. pkg:apk/openssl@3.2.1?distro=alpine-3.20.3)
+    {{.appName}} CPE                                    read a single CPE directly (e.g. cpe:2.3:a:openssl:openssl:3.0.14:*:*:*:*:*)
 
 You can also pipe in Syft JSON directly:
 	syft yourimage:tag -o json | {{.appName}}
@@ -209,7 +210,7 @@ func runGrype(app clio.Application, opts *options.Grype, userInput string) (errs
 	log.WithFields("time", time.Since(startTime)).Info("found vulnerability matches")
 	startTime = time.Now()
 
-	model, err := models.NewDocument(app.ID(), packages, pkgContext, *remainingMatches, ignoredMatches, vp, opts, dbInfo(status, vp), models.SortByPackage)
+	model, err := models.NewDocument(app.ID(), packages, pkgContext, *remainingMatches, ignoredMatches, vp, opts, dbInfo(status, vp), models.SortStrategy(opts.SortBy.Criteria))
 	if err != nil {
 		return fmt.Errorf("failed to create document: %w", err)
 	}
@@ -261,28 +262,25 @@ func applyDistroHint(pkgs []pkg.Package, context *pkg.Context, opts *options.Gry
 		if len(split) > 1 {
 			v = split[1]
 		}
-		context.Distro = &linux.Release{
-			PrettyName: d,
-			Name:       d,
-			ID:         d,
-			IDLike: []string{
-				d,
-			},
-			Version:   v,
-			VersionID: v,
+		var err error
+		context.Distro, err = distro.NewFromNameVersion(d, v)
+		if err != nil {
+			log.WithFields("distro", opts.Distro, "error", err).Warn("unable to parse distro")
 		}
 	}
 
-	hasOSPackage := false
+	hasOSPackageWithoutDistro := false
 	for _, p := range pkgs {
 		switch p.Type {
 		case syftPkg.AlpmPkg, syftPkg.DebPkg, syftPkg.RpmPkg, syftPkg.KbPkg:
-			hasOSPackage = true
+			if p.Distro == nil {
+				hasOSPackageWithoutDistro = true
+			}
 		}
 	}
 
-	if context.Distro == nil && hasOSPackage {
-		log.Warnf("Unable to determine the OS distribution. This may result in missing vulnerabilities. " +
+	if context.Distro == nil && hasOSPackageWithoutDistro {
+		log.Warnf("Unable to determine the OS distribution of some packages. This may result in missing vulnerabilities. " +
 			"You may specify a distro using: --distro <distro>:<version>")
 	}
 }
