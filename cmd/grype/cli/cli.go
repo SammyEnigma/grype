@@ -4,7 +4,10 @@ import (
 	"errors"
 	"os"
 	"runtime/debug"
+	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/anchore/clio"
@@ -31,14 +34,18 @@ func Command(id clio.Identification) *cobra.Command {
 	return cmd
 }
 
-func create(id clio.Identification) (clio.Application, *cobra.Command) {
-	clioCfg := clio.NewSetupConfig(id).
+func SetupConfig(id clio.Identification) *clio.SetupConfig {
+	return clio.NewSetupConfig(id).
 		WithGlobalConfigFlag().   // add persistent -c <path> for reading an application config from
 		WithGlobalLoggingFlags(). // add persistent -v and -q flags tied to the logging config
 		WithConfigInRootHelp().   // --help on the root command renders the full application config in the help text
 		WithUIConstructor(
 			// select a UI based on the logging configuration and state of stdin (if stdin is a tty)
 			func(cfg clio.Config) (*clio.UICollection, error) {
+				// remove CI var from consideration when determining if we should use the UI
+				lipgloss.SetDefaultRenderer(lipgloss.NewRenderer(os.Stdout, termenv.WithEnvironment(environWithoutCI{})))
+
+				// setup the UIs
 				noUI := ui.None(cfg.Log.Quiet)
 				if !cfg.Log.AllowUI(os.Stdin) || cfg.Log.Quiet {
 					return clio.NewUICollection(noUI), nil
@@ -85,6 +92,10 @@ func create(id clio.Identification) (clio.Application, *cobra.Command) {
 			}
 			return 1
 		})
+}
+
+func create(id clio.Identification) (clio.Application, *cobra.Command) {
+	clioCfg := SetupConfig(id)
 
 	app := clio.New(*clioCfg)
 
@@ -121,4 +132,25 @@ func syftVersion() (string, any) {
 
 func dbVersion() (string, any) {
 	return "Supported DB Schema", v6.ModelVersion
+}
+
+type environWithoutCI struct {
+}
+
+func (e environWithoutCI) Environ() []string {
+	var out []string
+	for _, s := range os.Environ() {
+		if strings.HasPrefix(s, "CI=") {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func (e environWithoutCI) Getenv(s string) string {
+	if s == "CI" {
+		return ""
+	}
+	return os.Getenv(s)
 }
